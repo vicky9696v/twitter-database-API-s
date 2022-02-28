@@ -5,7 +5,7 @@ const { open } = require("sqlite");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcrypt");
 const app = express();
-console.log({ bcrypt });
+
 app.use(express.json());
 let db = null;
 const initializationDbServer = async () => {
@@ -30,7 +30,6 @@ app.post("/register/", async (request, response) => {
   let data = null;
   const { username, password, name, gender } = request.body;
   const hashedPassword = await bcrypt.hash(password, 10);
-  //   console.log({ hashedPassword });
   const sqlQuery = `
     SELECT * FROM user WHERE username = '${username}';`;
   data = await db.get(sqlQuery);
@@ -94,6 +93,7 @@ const authentication = (request, response, next) => {
         response.status(401);
         response.send("Invalid JWT Token");
       } else {
+        request.username = payload.username;
         next();
       }
     });
@@ -109,47 +109,62 @@ const authentication = (request, response, next) => {
 // API 3
 
 app.get("/user/tweets/feed/", authentication, async (request, response) => {
+  let { username } = request;
   const sqlQuery = `
     SELECT username, tweet, 
     date_time AS dateTime 
-    FROM user NATURAL JOIN tweet
-    GROUP BY username
-    ORDER BY date_time ASC
-    LIMIT 4;`;
+    FROM user NATURAL JOIN tweet 
+    natural join follower where follower_user_id = ${2}
+    group by tweet
+    order by username
+    limit 4
+    offset 5
+    ;`;
   data = await db.all(sqlQuery);
   response.send(data);
 });
 
 // API 4
 app.get("/user/following/", authentication, async (request, response) => {
+  let { username } = request;
+  const selectQuery = ` select * from user where username = '${username}';`;
+  data = await db.get(selectQuery);
   const sqlQuery = `
-    SELECT name FROM user WHERE;`;
+      SELECT name FROM user join follower WHERE following_user_id = ${data.user_id};`;
+
   data = await db.all(sqlQuery);
   response.send(data);
 });
 
 // API 5
 app.get("/user/followers/", authentication, async (request, response) => {
+  const { username } = request;
+
+  const selectQuery = ` select * from user where username = '${username}';`;
+  data = await db.get(selectQuery);
   const sqlQuery = `
-    SELECT name FROM user;`;
+      SELECT name FROM user join follower WHERE follower_user_id = ${data.user_id};`;
+
   data = await db.all(sqlQuery);
   response.send(data);
 });
 // API 6
 
 app.get("/tweets/:tweetId/", authentication, async (request, response) => {
+  let { username } = request;
   const { tweetId } = request.params;
   let sqlQuery;
-  const getQuery = `SELECT tweet, count(like.like_id) AS likes, date_time AS dateTime
+  const getQuery = `SELECT *
    FROM tweet
-   NATURAL JOIN like  WHERE tweet_id = ${tweetId};`;
+  WHERE tweet_id = ${tweetId};`;
   data = await db.get(getQuery);
   if (data === undefined) {
     response.status(401);
     response.send("Invalid Request");
   } else {
     sqlQuery = `
-         SELECT * FROM tweet WHERE tweet_id = ${tweetId};`;
+         SELECT tweet, count(like.like_id) AS likes, count(reply_id) as replies,
+          date_time AS dateTime FROM tweet join like join reply WHERE like.user_id = ${2} and reply.user_id = ${2} and tweet.tweet_id = ${tweetId};`;
     data = await db.get(sqlQuery);
     response.send(data);
   }
@@ -161,8 +176,23 @@ app.get(
   "/tweets/:tweetId/likes/",
   authentication,
   async (request, response) => {
+    let getQuery;
+    let { username } = request;
     const { tweetId } = request.params;
-    const sqlQuery = ` SELECT COUNT(like) FROM `;
+    const sqlQuery = ` SELECT * FROM user join follower 
+    where user_id and following_user_id = ${2}
+    ;`;
+    data = await db.get(sqlQuery);
+    if (data === undefined) {
+      response.status(401);
+      response.send("Invalid Request");
+    } else {
+      if (data === true) {
+        getQuery = ` select name as likes from user join like where user_id = ${2};`;
+        data = await db.get(getQuery);
+        response.send(data);
+      }
+    }
   }
 );
 
@@ -172,15 +202,45 @@ app.get(
   "/tweets/:tweetId/replies/",
   authentication,
   async (request, response) => {
-    const { tweedId } = request.params;
+    const { tweetId } = request.params;
+    const { username } = request;
+    let replyQuery;
+    const sqlQuery = ` select * from tweet inner join user on tweet.user_id = user.user_id
+    where tweet_id = ${tweetId} and user.username = '${username}';`;
+    data = await db.get(sqlQuery);
+    if (data === undefined) {
+      response.status(401);
+      response.send("Invalid Request");
+    } else {
+      if (data.username === username) {
+        replyQuery = `
+          select name , reply from user 
+          inner join reply on user.user_id = reply.user_id
+          inner join tweet on user.user_id = tweet.user_id 
+          where tweet.tweet_id = ${tweetId};`;
+        const replies = await db.all(replyQuery);
+        response.send({ replies });
+      } else {
+        response.status(401);
+        response.send("Invalid Request");
+      }
+    }
   }
 );
 // API 9
 
 app.get("/user/tweets/", authentication, async (request, response) => {
-  // const {username} = request.body;
+  let { username } = request;
   const sqlQuery = `
-    SELECT * FROM tweet ;`;
+    SELECT tweet, 
+    count(like_id) as likes, 
+    count(reply_id) as replies,
+    date_time as dateTime
+    from tweet natural join user 
+    inner join like on tweet.user_id = like.user_id
+    inner join reply on tweet.user_id = reply.user_id 
+    where username = '${username}' and like.user_id = ${2} and reply.user_id = ${2}
+    group by tweet;`;
   data = await db.all(sqlQuery);
   response.send(data);
 });
@@ -196,18 +256,28 @@ app.post("/user/tweets/", authentication, async (request, response) => {
 // API 11
 
 app.delete("/tweets/:tweetId/", authentication, async (request, response) => {
+  let { username } = request;
   const { tweetId } = request.params;
-  let sqlQuery;
-  const deleteQuery = ` SELECT * FROM tweet WHERE tweet_id = ${tweetId};`;
-  data = await db.get(deleteQuery);
-  if (data === undefined) {
+  const selectQuery = ` select * from user where username = '${username}';`;
+  data = await db.get(selectQuery);
+  let deleteQuery;
+  const sqlQuery = `
+  select * from tweet where  tweet.user_id = ${data.user_id} and tweet_id = ${tweetId};`;
+  let result = await db.get(sqlQuery);
+  if (result === undefined) {
     response.status(401);
     response.send("Invalid Request");
   } else {
-    sqlQuery = ` DELETE FROM tweet WHERE tweet_id = ${tweetId};`;
-    await db.run(sqlQuery);
-    response.send("Tweet Removed");
+    if (result.user_id === data.user_id) {
+      deleteQuery = `delete from tweet where tweet_id = ${tweetId};`;
+      await db.run(deleteQuery);
+      response.send("Tweet Removed");
+    } else {
+      response.status(401);
+      response.send("Invalid Request");
+    }
   }
+  response.send(result);
 });
 
 module.exports = app;
